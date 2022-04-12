@@ -15,6 +15,7 @@ album=''
 titleRegex=''
 albumCover=''
 playlist=''
+split=''
 artists=''
 output='Music'
 
@@ -27,6 +28,7 @@ print_usage() {
                         Using '.' will set it to the album name
                         Note that all exports are placed in the 'export' folder"
   echo "  -p                    Is a playlist"
+  echo "  -s                    Is split by chapters (partially automatic, this will format the output correctly)"
   echo "  -h                    Print this help"
   echo "  -t    <regex>         Regex to match title, default: '(.*)', requires the use of a singular (). 
                         Sometimes, namely if the first part of the regex is a special char then they need to be escaped with '\\'. 
@@ -39,7 +41,7 @@ print_usage() {
   echo '  PS> wsl ./yt-ag.sh -c ./The_War_to_End_All_Wars_Sabaton.jpg -a "The War to End All Wars" -o "." -t "^[0-9]+ - SABATON - (.*)\(.*$" -p https://www.youtube.com/playlist?list=PLA_zjX3swAf438D0GWjbh81cejxPwnmeR'
 }
 
-while getopts 'a:t:c:hpo:m:' flag; do
+while getopts 'a:t:c:hpo:m:s' flag; do
   case "${flag}" in
     a) album="${OPTARG}" ;;
     t) titleRegex="${OPTARG}" ;;
@@ -47,6 +49,7 @@ while getopts 'a:t:c:hpo:m:' flag; do
     p) playlist='true' ;;
     o) output="${OPTARG}" ;;
     m) artists="${OPTARG}" ;;
+    s) split='true' ;;
     h) print_usage; exit 0 ;;
     *) print_usage
        exit 1 ;;
@@ -61,13 +64,40 @@ mkdir -p "./export/${output}"
 echo "DOWNLOADING..."
 # This will rip all the music from the youtube URL
 #yt-dlp --extract-audio --audio-format mp3 --audio-quality 0 --add-metadata --output "%(title)s.%(ext)s" $1
-yt-dlp --quiet --extract-audio --audio-format mp3 --audio-quality 0 --embed-thumbnail --parse-metadata "description:(?s)(?P<meta_comment>.+) title:(%(title)s)" --add-metadata --output "./export/${output}/%(playlist_index|)s%(playlist_index& - |)s%(title)s.%(ext)s" ${@: -1}
+yt-dlp --quiet --split-chapters --extract-audio --audio-format mp3 --audio-quality 0 --embed-thumbnail --parse-metadata "description:(?s)(?P<meta_comment>.+) title:(%(title)s)" --add-metadata --output "./export/${output}/%(playlist_index|)s%(playlist_index& - |)s%(title)s.%(ext)s" ${@: -1}
 
+mv *.mp3 ./export/"${output}"/
 
 # This is where we fine tune the metadata of the musics using ffmpeg
 echo "FINETUNING..."
 
 mkdir -p "./export/${output}/temp"
+
+
+if [ -n "$split" ]; then
+  echo "FORMATTING SPLIT..."
+  for file in ./export/"${output}"/*.mp3; do
+    # Will rename the files to the correct format
+    reg=".* - ([0-9]+) (.*) \["
+    if [[ $file =~ $reg ]] 
+    then
+      newName="${BASH_REMATCH[1]} - ${BASH_REMATCH[2]}"
+      echo "(SPLIT) Renaming $(basename "${file}" .mp3) to ${newName}"
+      mv "$file" "./export/${output}/${newName}.mp3"
+
+      # Automatically fix the title
+      titleRegex=".* - (.*)"
+      [[ $newName =~ $titleRegex ]] && title="${BASH_REMATCH[1]}"
+      echo "(SPLIT) Setting title to ${title}"
+      ffmpeg -y -hide_banner -loglevel error -i "./export/${output}/${newName}.mp3" -map 0 -c:a copy -c:s copy -c copy -id3v2_version 3 -metadata title="${title}" "export/${output}/temp/${newName%.*}.mp3"
+      mv export/"${output}"/temp/* export/"${output}"/
+    else
+      echo "(SPLIT) Removing ${file}"
+      rm "$file"
+    fi
+  done
+fi
+
 
 for file in ./export/"${output}"/*.mp3; do
     # Get the base filename of the file
@@ -76,25 +106,25 @@ for file in ./export/"${output}"/*.mp3; do
     # if the album and cover is set
     if [ -n "${album}" ] && [ -n "${albumCover}" ]; then
       echo "(METADATA) ALBUM : COVER :: ${album} : ${albumCover}"
-      ffmpeg -hide_banner -loglevel warning -i "${file}" -i "${albumCover}" -map 0:0 -map 1:0 -c copy -id3v2_version 3 -metadata album="${album}" -metadata:s:v comment="Cover (front)" "export/${output}/temp/${title%.*}.mp3"
+      ffmpeg -hide_banner -loglevel error -i "${file}" -i "${albumCover}" -map 0:0 -map 1:0 -c copy -id3v2_version 3 -metadata album="${album}" -metadata:s:v comment="Cover (front)" "export/${output}/temp/${title%.*}.mp3"
       continue
     fi
     
     # if the album is set
     if [ -n "${album}" ]; then
       echo "(METADATA) ALBUM :: ${album}"
-      ffmpeg -hide_banner -loglevel warning -i "${file}" -c copy -id3v2_version 3 -metadata album="${album}" "export/${output}/temp/${title%.*}.mp3"
+      ffmpeg -hide_banner -loglevel error -i "${file}" -c copy -id3v2_version 3 -metadata album="${album}" "export/${output}/temp/${title%.*}.mp3"
       continue
     fi
 
     # if the cover is set
     if [ -n "${albumCover}" ]; then
       echo "(METADATA) ALBUMCOVER :: ${albumCover}"
-      ffmpeg -hide_banner -loglevel warning -i "${file}" -i "${albumCover}" -map 0:0 -map 1:0 -c copy -id3v2_version 3 -metadata:s:v comment="Cover (front)" "export/${output}/temp/${title%.*}.mp3"
+      ffmpeg -hide_banner -loglevel error -i "${file}" -i "${albumCover}" -map 0:0 -map 1:0 -c copy -id3v2_version 3 -metadata:s:v comment="Cover (front)" "export/${output}/temp/${title%.*}.mp3"
       continue
     fi
 
-    ffmpeg -hide_banner -loglevel warning -i "${file}" "export/${output}/temp/${title%.*}.mp3"
+    ffmpeg -hide_banner -loglevel error -i "${file}" "export/${output}/temp/${title%.*}.mp3"
 done
 
 # move the files from the temp folder to the export/${output}/ folder and delete the temp folder
@@ -110,7 +140,7 @@ if [ -n "${titleRegex}" ]; then
 
     [[ $title =~ $titleRegex  ]] && title2=${BASH_REMATCH[1]} || title2=${title}
     echo "(METADATA) TITLE: ${title} :: To: ${title2}"
-    ffmpeg -y -hide_banner -loglevel warning -i "${file}" -map 0 -c:a copy -c:s copy -c copy -id3v2_version 3 -metadata title="${title2}" "export/${output}/temp/${title%.*}.mp3"
+    ffmpeg -y -hide_banner -loglevel error -i "${file}" -map 0 -c:a copy -c:s copy -c copy -id3v2_version 3 -metadata title="${title2}" "export/${output}/temp/${title%.*}.mp3"
   done
 
   # move the files from the temp folder to the export/${output}/ folder and delete the temp folder
@@ -130,7 +160,7 @@ fi
       number="${BASH_REMATCH[1]}" 
       [[ $title =~ $titleRegex  ]] && title2=${BASH_REMATCH[1]} || title2=${title}
       echo "(METADATA) TRACK: ${title2}... :: Track # to: ${number}"
-      ffmpeg -y -hide_banner -loglevel warning -i "${file}" -map 0 -c:a copy -c:s copy -c copy -id3v2_version 3 -metadata track="${number}" "export/${output}/temp/${title%.*}.mp3"
+      ffmpeg -y -hide_banner -loglevel error -i "${file}" -map 0 -c:a copy -c:s copy -c copy -id3v2_version 3 -metadata track="${number}" "export/${output}/temp/${title%.*}.mp3"
     else
       echo "No track ID found"
     fi
@@ -146,7 +176,7 @@ if [ -n "${artists}" ]; then
     # Get the base filename of the file
     title="$(basename "${file}" .mp3)"
     echo "(METADATA) ARTISTS: ${artists}"
-    ffmpeg -y -hide_banner -loglevel warning -i "${file}" -map 0 -c:a copy -c:s copy -c copy -id3v2_version 3 -metadata artist="${artists}" "export/${output}/temp/${title%.*}.mp3"
+    ffmpeg -y -hide_banner -loglevel error -i "${file}" -map 0 -c:a copy -c:s copy -c copy -id3v2_version 3 -metadata artist="${artists}" "export/${output}/temp/${title%.*}.mp3"
   done
 
   # move the files from the temp folder to the export/${output}/ folder and delete the temp folder
@@ -155,9 +185,7 @@ fi
 
 echo "Cleaning up..."
 rm -rf export/"${output}"/temp
-
+  
 echo "Done!"
 
 echo "Location: $(find "$(pwd)"/export/"${output}" -type d)/"
-
-
